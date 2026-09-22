@@ -1,0 +1,17 @@
+# Automatic HTTPS via Let's Encrypt.
+#
+# SITE_ADDRESS is a nip.io hostname such as logmonitor.34.1.2.3.nip.io, which
+# resolves to the VM's IP without owning a domain. That gives Caddy something
+# to get a certificate for, which in turn lets the session cookie be Secure.
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	# Uploads stream; the default timeouts would cut a large one short.
+	request_body {
+		max_size 128MB
+	}
+
+	reverse_proxy web:3000 {
+		flush_interval -1
+	}
+}

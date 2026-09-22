@@ -1,0 +1,157 @@
+# LogMonitor on a single always-free Compute Engine e2-micro.
+#
+#   docker compose -f docker-compose.vm.yml up -d
+#
+# Differences from the development stack, all driven by 1 GB of RAM:
+#
+#   * images are pulled, never built -- an e2-micro has 0.25 vCPU and would
+#     take ~20 minutes to compile the gateway, if it did not run out of memory
+#   * no MinIO: blob storage is native GCS through the VM's service account,
+#     which is both free at this scale and ~100 MB of RAM we get back
+#   * Postgres, Redis and the Go heap are all capped explicitly
+#   * Caddy terminates TLS so the session cookie can carry Secure
+#
+# Budget, measured against the development stack:
+#   caddy ~25MB · postgres ~150MB · redis ~15MB · gateway ~80MB · web ~100MB
+#   ≈ 370 MB, leaving headroom on a 1 GB machine with swap.
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  caddy:
+    <<: *restart
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    environment:
+      # nip.io resolves <anything>.<ip>.nip.io to that IP, which gives Caddy a
+      # real hostname to get a Let's Encrypt certificate for -- no domain
+      # purchase, and no self-signed certificate warnings.
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS, e.g. logmonitor.34.1.2.3.nip.io}
+    depends_on: [web]
+    mem_limit: 64m
+
+  db:
+    <<: *restart
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-logmonitor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: ${POSTGRES_DB:-logmonitor}
+    # Tuned down from the defaults, which assume a machine with room to spare.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=96MB
+      - -c
+      - max_connections=40
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - effective_cache_size=256MB
+    volumes:
+      - pgdata16:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-logmonitor}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 320m
+
+  redis:
+    <<: *restart
+    # Rate-limit counters and TOTP replay keys are small and all carry a TTL,
+    # so a hard cap with LRU eviction is safe here.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "48mb",
+              "--maxmemory-policy", "allkeys-lru"]
+    image: redis:7-alpine
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 80m
+
+  migrate:
+    image: ${GATEWAY_IMAGE:?required}
+    command: ["-migrate"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-logmonitor}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-logmonitor}?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:?required}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  gateway:
+    <<: *restart
+    image: ${GATEWAY_IMAGE:?required}
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-logmonitor}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-logmonitor}?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:?required}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:?required}
+      METRICS_TOKEN: ${METRICS_TOKEN:?required}
+      # No S3_ENDPOINT => the native GCS client, authenticating as the VM's
+      # service account. Nothing secret is stored on the machine.
+      S3_BUCKET: ${S3_BUCKET:?required}
+      # Unset in production => native GCS. Set locally to point at MinIO, so
+      # this file can be exercised before it reaches a VM.
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+      # Caddy terminates TLS in front, so the cookie must carry Secure.
+      COOKIE_SECURE: "true"
+      EDGE_AUTH_ENABLED: ${EDGE_AUTH_ENABLED:-false}
+      EDGE_AUTH_USER: ${EDGE_AUTH_USER:-}
+      EDGE_AUTH_PASS_HASH: ${EDGE_AUTH_PASS_HASH:-}
+      # Smaller than the 640MiB used in development: on a 1 GB machine the
+      # collector should work harder rather than hold headroom. Ingest still
+      # streams, so this bounds memory rather than capability.
+      GOMEMLIMIT: ${GOMEMLIMIT:-192MiB}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-134217728}
+      PORT: 8000
+    healthcheck:
+      test: ["CMD", "/app/gateway", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    mem_limit: 256m
+
+  web:
+    <<: *restart
+    image: ${WEB_IMAGE:?required}
+    environment:
+      API_URL: http://gateway:8000
+      EDGE_AUTH_ENABLED: ${EDGE_AUTH_ENABLED:-false}
+      EDGE_AUTH_USER: ${EDGE_AUTH_USER:-}
+      EDGE_AUTH_PASS_SHA256: ${EDGE_AUTH_PASS_SHA256:-}
+      NODE_OPTIONS: "--max-old-space-size=128"
+      PORT: 3000
+    depends_on:
+      gateway:
+        condition: service_healthy
+    mem_limit: 192m
+
+volumes:
+  pgdata16:
+  redisdata:
+  caddydata:
+  caddyconfig:

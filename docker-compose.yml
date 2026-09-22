@@ -1,0 +1,174 @@
+# LogMonitor v2.
+#
+# Note the db volume is `pgdata16`, not the v1 `pgdata`. The image moves from
+# postgres:16-alpine (musl) to pgvector/pgvector:pg16 (glibc), and reusing a
+# PGDATA directory across libc implementations risks silent text-index
+# corruption from collation differences. A new volume sidesteps that, and
+# leaves the v1 volume intact should you want anything out of it.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-logmonitor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-logmonitor}
+      POSTGRES_DB: ${POSTGRES_DB:-logmonitor}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata16:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-logmonitor}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # One-shot. The gateway image running with -migrate: the SQL is embedded in
+  # the binary, so the artifact that serves traffic and the one that migrates
+  # are the same, and there is no mounted directory to fall out of date.
+  migrate:
+    build: ./gateway
+    command: ["-migrate"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-logmonitor}:${POSTGRES_PASSWORD:-logmonitor}@db:5432/${POSTGRES_DB:-logmonitor}?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    # appendonly: shard jobs outlive a restart. The whole point of moving off
+    # BackgroundTasks was that a restart stopped orphaning analyses.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Stands in for GCS locally. Same S3 API, so gateway/internal/blob has one
+  # interface and the cloud path differs only in configuration.
+  minio:
+    # quay.io, not Docker Hub: MinIO's Hub images are no longer publicly
+    # pullable ("pull access denied"). quay.io is their official registry.
+    image: quay.io/minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-logmonitor}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-logmonitor-secret}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  minio-init:
+    image: quay.io/minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${S3_ACCESS_KEY:-logmonitor} ${S3_SECRET_KEY:-logmonitor-secret} &&
+      mc mb --ignore-existing local/${S3_BUCKET:-logmonitor-raw} &&
+      mc version enable local/${S3_BUCKET:-logmonitor-raw}
+      "
+
+  # Go: auth, orgs, grants, streaming upload -> parse -> COPY, all read queries.
+  gateway:
+    build: ./gateway
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-logmonitor}:${POSTGRES_PASSWORD:-logmonitor}@db:5432/${POSTGRES_DB:-logmonitor}?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-logmonitor-raw}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-logmonitor}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-logmonitor-secret}
+      S3_FORCE_PATH_STYLE: "true"
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-536870912}
+      SHARD_SIZE: ${SHARD_SIZE:-25000}
+      METRICS_TOKEN: ${METRICS_TOKEN:-dev-metrics-token}
+      # Defaults to true in code; opted out here only because local dev is http.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      EDGE_AUTH_ENABLED: ${EDGE_AUTH_ENABLED:-false}
+      EDGE_AUTH_USER: ${EDGE_AUTH_USER:-}
+      EDGE_AUTH_PASS_HASH: ${EDGE_AUTH_PASS_HASH:-}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
+      LOGIN_RATE_LIMIT_ENABLED: ${LOGIN_RATE_LIMIT_ENABLED:-true}
+      # A soft heap ceiling. Measured: without it the heap settles at ~600 MB
+      # of GC headroom after the first upload -- uncomfortably close to the
+      # 1Gi scripts/deploy_gcp.sh gives Cloud Run. At 640MiB the heap holds at
+      # 66 MB (RSS 155 MB) with no throughput cost: 400 MB ingests in 22s
+      # either way. Tightening further to 384MiB still works but costs ~70%
+      # more wall time, because the collector runs much harder.
+      GOMEMLIMIT: ${GOMEMLIMIT:-640MiB}
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "/app/gateway", "-healthcheck"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  # Python: map/reduce detection and the Claude stage. No HTTP surface.
+  worker:
+    build: ./worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-logmonitor}:${POSTGRES_PASSWORD:-logmonitor}@db:5432/${POSTGRES_DB:-logmonitor}
+      REDIS_URL: redis://redis:6379/0
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5}
+      LOG_HASH_SALT: ${JWT_SECRET:-dev-secret-change-me}
+      SHARD_SIZE: ${SHARD_SIZE:-25000}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    # Scale with: docker compose up --scale worker=4
+    # Sharding is by (org, owner, time bucket), so parallelism is real.
+    deploy:
+      replicas: 2
+
+  web:
+    build: ./web
+    environment:
+      API_URL: http://gateway:8000
+      # The browser-facing half of the edge gate. The gateway holds an argon2id
+      # hash of the same credential; middleware runs on the edge runtime where
+      # only Web Crypto exists, hence a SHA-256 digest here.
+      EDGE_AUTH_ENABLED: ${EDGE_AUTH_ENABLED:-false}
+      EDGE_AUTH_USER: ${EDGE_AUTH_USER:-}
+      EDGE_AUTH_PASS_SHA256: ${EDGE_AUTH_PASS_SHA256:-}
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+volumes:
+  pgdata16:
+  redisdata:
+  miniodata:

@@ -1,0 +1,118 @@
+name: CI
+
+# The 103 Go and 61 Python tests only protected anything when someone
+# remembered to run them. Two of the three bugs in Phase 4 were caught by
+# running the stack rather than the suite, so the suite running itself is the
+# floor, not the ceiling.
+
+on:
+  push:
+    branches: [main, v2-multitenant]
+  pull_request:
+
+jobs:
+  gateway:
+    name: gateway (Go)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # pgvector, not stock postgres: migration 6 runs CREATE EXTENSION vector.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: logmonitor
+          POSTGRES_PASSWORD: logmonitor
+          POSTGRES_DB: logmonitor
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U logmonitor"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://logmonitor:logmonitor@localhost:5432/logmonitor?sslmode=disable
+      TEST_REDIS_URL: redis://localhost:6379/0
+      DATABASE_URL: postgres://logmonitor:logmonitor@localhost:5432/logmonitor?sslmode=disable
+      JWT_SECRET: ci-secret-not-used-for-anything
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: gateway/go.sum
+      - name: Apply migrations
+        working-directory: gateway
+        run: go run ./cmd/gateway -migrate
+      - name: Vet
+        working-directory: gateway
+        run: go vet ./...
+      - name: Test
+        working-directory: gateway
+        run: go test ./... -count=1
+
+  worker:
+    name: worker (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: worker/requirements*.txt
+      - name: Install
+        working-directory: worker
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Test
+        working-directory: worker
+        run: python -m pytest tests/ -q
+
+  accuracy:
+    name: detector accuracy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The gate that matters for detection: 6/6 recall on the labelled
+      # suspicious sample, no false positives on the benign one. Exits
+      # non-zero on regression, so a refactor that quietly stops finding an
+      # attack fails the build instead of shipping.
+      - name: Measure accuracy against labelled samples
+        run: python scripts/measure_accuracy.py
+
+  web:
+    name: web (Next.js)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        working-directory: web
+        run: npm ci
+      - name: Typecheck
+        working-directory: web
+        run: npx tsc --noEmit
+      - name: Build
+        working-directory: web
+        run: npm run build
+
+  scripts:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: for f in scripts/*.sh; do bash -n "$f"; done
+      - uses: ludeeus/action-shellcheck@master
+        with:
+          severity: warning
+          scandir: ./scripts
