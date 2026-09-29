@@ -16,7 +16,9 @@
 #   brew install --cask google-cloud-sdk
 #   gcloud auth login
 #   gcloud config set project YOUR_PROJECT_ID
-#   ...and billing enabled on that project.
+#
+# The project must be able to provision Cloud SQL and Memorystore; a project
+# restricted to always-free resources cannot, and the API calls below fail.
 #
 # Usage:  ./deploy/deploy_gcp.sh
 #
@@ -61,7 +63,7 @@ bold "Deploying LogMonitor v2"
 info "project : $PROJECT_ID"
 info "region  : $REGION"
 info "bucket  : gs://$BUCKET"
-warn "Memorystore + the VPC connector cost roughly \$43/month on top of Cloud SQL."
+warn "Cloud SQL, Memorystore and the VPC connector run continuously; none scale to zero."
 warn "Tear everything down with ./deploy/teardown_gcp.sh when you are done."
 
 # --- 1. APIs ----------------------------------------------------------------
@@ -314,4 +316,4 @@ info "bucket  : gs://$BUCKET"
 [ "$HAVE_AI" = "1" ] || info "NOTE: no Anthropic key -- the AI narrative is disabled."
 info ""
 info "Verify:    ./deploy/verify_gcp.sh"
-info "Tear down: ./deploy/teardown_gcp.sh   <-- Cloud SQL + Memorystore bill ~\$50/mo until you do"
+info "Tear down: ./deploy/teardown_gcp.sh   <-- Cloud SQL + Memorystore keep running until you do"

@@ -8,8 +8,9 @@
 #   Cloud Build       120 build-minutes/day free; builds the two images
 #   Artifact Registry 0.5 GB free; the images total roughly 200 MB
 #
-# Expected cost: $0, provided this is the only always-free VM in the project
-# and egress stays under 1 GB/month. Check before assuming:
+# Stays inside the always-free allowance only if this is the project's single
+# e2-micro and egress stays under 1 GB/month -- a second one is charged. Check
+# the current terms before relying on it:
 #   https://cloud.google.com/free/docs/free-cloud-features#compute
 #
 # Safe to re-run: existing resources are reused, and re-running redeploys.

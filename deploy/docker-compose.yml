@@ -113,9 +113,9 @@ services:
       LOGIN_RATE_LIMIT_ENABLED: ${LOGIN_RATE_LIMIT_ENABLED:-true}
       # A soft heap ceiling. Measured: without it the heap settles at ~600 MB
       # of GC headroom after the first upload -- uncomfortably close to the
-      # 1Gi scripts/deploy_gcp.sh gives Cloud Run. At 640MiB the heap holds at
-      # 66 MB (RSS 155 MB) with no throughput cost: 400 MB ingests in 22s
-      # either way. Tightening further to 384MiB still works but costs ~70%
+      # 1Gi deploy/deploy_gcp.sh gives Cloud Run. At 640MiB the heap holds at
+      # 66 MB (RSS 155 MB) with no throughput penalty: 400 MB ingests in 22s
+      # either way. Tightening further to 384MiB still works but adds ~70%
       # more wall time, because the collector runs much harder.
       GOMEMLIMIT: ${GOMEMLIMIT:-640MiB}
       PORT: 8000

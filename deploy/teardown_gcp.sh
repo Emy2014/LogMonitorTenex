@@ -2,8 +2,8 @@
 #
 # Delete every LogMonitor resource in the current project.
 #
-# Cloud SQL and Memorystore bill continuously (~$50/month together), so this
-# exists to make stopping that a single command.
+# Cloud SQL and Memorystore run continuously and neither scales to zero, so
+# this exists to make stopping them a single command.
 #
 # Usage:  ./deploy/teardown_gcp.sh
 #

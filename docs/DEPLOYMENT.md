@@ -5,7 +5,6 @@ Two options. Start with the free one.
 | | Free tier | Managed |
 |---|---|---|
 | Script | `deploy/deploy_gce_free.sh` | `deploy/deploy_gcp.sh` |
-| Cost | **$0** | ~$50/month |
 | Shape | one e2-micro running everything | Cloud Run + Cloud SQL + Memorystore |
 | Scales | no | yes |
 | Backups, failover | none — yours to arrange | managed |
@@ -138,10 +137,13 @@ Two Cloud Run services over four managed resources.
 ```bash
 brew install --cask google-cloud-sdk
 gcloud auth login
-gcloud config set project YOUR_PROJECT_ID     # billing must be enabled
+gcloud config set project YOUR_PROJECT_ID
 
 ./deploy/deploy_gcp.sh
 ```
+
+The project must be able to provision Cloud SQL and Memorystore; one restricted
+to always-free resources cannot, and the API calls fail early.
 
 Re-runnable: every resource is created only if absent, so a failed run can be
 repeated. First run takes 15–20 minutes, most of it waiting for Cloud SQL and
@@ -158,25 +160,15 @@ export EDGE_AUTH_USER=ops EDGE_AUTH_PASS='...'   # only if the edge gate is on
 development or a deployment — a verification script that only ever runs in one
 environment tends to be wrong in the other.
 
-## Cost
-
-| Resource | Approx. monthly |
-|---|---|
-| Cloud SQL `db-f1-micro` | $8–10 |
-| Memorystore Redis Basic, 1 GB | ~$35 |
-| Serverless VPC Access connector | ~$8 |
-| Cloud Run (both services, scale to zero) | ~$0 idle |
-| Cloud Storage | pennies; uploads compress ~13× |
-| **Total** | **~$50** |
-
-Neither Cloud SQL nor Memorystore scales to zero, so the bill runs whether or
-not anyone signs in. `./deploy/teardown_gcp.sh` deletes everything.
+Neither Cloud SQL nor Memorystore scales to zero: both stay provisioned
+whether or not anyone signs in, unlike Cloud Run either side of them.
+`./deploy/teardown_gcp.sh` removes everything the managed path creates.
 
 **Redis is not optional.** It backs login rate limiting and TOTP replay
 protection. The limiter fails open by design — an unreachable cache must not
 become an authentication outage — so without Redis the service still runs, but
 password guessing is unthrottled and a TOTP code can be replayed inside its
-30-second window. That is the price of the controls, stated plainly.
+30-second window. That is the trade-off those controls impose, stated plainly.
 
 ## Things that are load-bearing
 
@@ -205,7 +197,7 @@ happens; alert on it.
 **`GOMEMLIMIT=640MiB`.** Measured, not guessed. Without a limit the Go heap
 settles around 600 MB of GC headroom after the first upload, which is
 uncomfortably close to the 1Gi the service is given. At 640MiB the heap holds
-at 66 MB and RSS around 155 MB, with no throughput cost — 400 MB of log still
+at 66 MB and RSS around 155 MB, with no throughput penalty — 400 MB of log still
 ingests in about 22 seconds.
 
 **GCS uses the runtime service account, not HMAC keys.** `S3_ENDPOINT` is left
