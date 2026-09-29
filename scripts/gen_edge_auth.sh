@@ -19,7 +19,7 @@ sha256=$(printf '%s' "$password" | openssl dgst -sha256 -hex | awk '{print $NF}'
 
 # argon2id via the gateway's own implementation, so the parameters cannot
 # drift apart from what the server verifies against.
-argon=$(cd "$(dirname "$0")/../gateway" && \
+argon=$(cd "$(dirname "$0")/../backend/gateway" && \
   go run ./cmd/hashpass "$password" 2>/dev/null)
 
 cat <<OUT

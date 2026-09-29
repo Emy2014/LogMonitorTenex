@@ -1,0 +1,12 @@
+# What `gcloud builds submit` uploads. Separate from .dockerignore, which only
+# filters the build context once the tarball has arrived -- gcloud does not
+# read that file, so without this one a developer's local node_modules is
+# uploaded to Cloud Build on every deploy (13,499 files, 314 MiB measured).
+.gcloudignore
+.git
+.gitignore
+
+node_modules
+.next
+.DS_Store
+tsconfig.tsbuildinfo

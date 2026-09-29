@@ -103,3 +103,52 @@ func (s *Store) ListVisibleUploads(ctx context.Context, caller *User) ([]UploadL
 	}
 	return out, rows.Err()
 }
+
+// DeleteUpload removes an upload and everything derived from it, returning the
+// number of log_entries rows that went with it.
+//
+// Most of the graph looks after itself: analyses, entry_rollups, error_detail
+// and access_grants all reference uploads(id) ON DELETE CASCADE, and anomalies,
+// analysis_timings and finding_embeddings cascade in turn from analyses. The
+// exception is log_entries, which carries no foreign key at all -- it is
+// RANGE-partitioned on ts and has no primary key for one to point at -- so its
+// rows have to be removed explicitly.
+//
+// Both statements run in one transaction. Deleting the parent first and the
+// entries afterwards would leave, on any failure between them, parsed browsing
+// history in the database with nothing left to say whose it was or how to find
+// it again -- the worst of the two outcomes, and the one the transaction exists
+// to rule out.
+//
+// org_id is in both WHERE clauses although id alone is unique: it makes a
+// caller from another organization delete nothing rather than rely on the
+// handler having checked, and it lets Postgres prune partitions by org.
+func (s *Store) DeleteUpload(ctx context.Context, orgID, id uuid.UUID) (int64, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	entries, err := tx.Exec(ctx,
+		`DELETE FROM log_entries WHERE upload_id = $1 AND org_id = $2`, id, orgID)
+	if err != nil {
+		return 0, err
+	}
+
+	upload, err := tx.Exec(ctx,
+		`DELETE FROM uploads WHERE id = $1 AND org_id = $2`, id, orgID)
+	if err != nil {
+		return 0, err
+	}
+	// Nothing matched: either it never existed or another request removed it
+	// first. Reported as not-found so a double click is not a 500.
+	if upload.RowsAffected() == 0 {
+		return 0, ErrNotFound
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return entries.RowsAffected(), nil
+}

@@ -26,9 +26,10 @@ const URGENCIES: Urgency[] = ["immediate", "today", "this_week", "monitor"];
 // days: null means no lower bound.
 //
 // "All" is not a convenience here, it is usually the correct answer. Uploaded
-// proxy logs are historical exports -- the bundled sample is dated March 2024
-// -- so every bounded window shows an empty dashboard and the product looks
-// broken.
+// proxy logs are historical exports, often older than every bounded window,
+// and then the dashboard comes back empty and the product looks broken. The
+// bundled samples are dated close to now so a first upload lands inside these
+// ranges, but a real export will not be.
 const RANGES: { label: string; days: number | null }[] = [
   { label: "24h", days: 1 },
   { label: "7d", days: 7 },

@@ -18,6 +18,14 @@
 x-restart: &restart
   restart: unless-stopped
 
+# Deliberately NOT pinned with `name:`, unlike the development stack.
+# Compose derives the project name from the directory this file sits in,
+# which on the VM is the deploy user's home -- and the stack already
+# deployed there was created under that derived name. Pinning a different
+# one does not rename it: Compose sees an unrelated project, builds a
+# second stack beside the first with its own empty volumes, and the new
+# Caddy then cannot bind :80 because the old one still holds it.
+
 services:
   caddy:
     <<: *restart
@@ -134,6 +142,34 @@ services:
       redis:
         condition: service_healthy
     mem_limit: 256m
+
+  # Python: map/reduce detection and the Claude stage. No HTTP surface.
+  #
+  # One replica, not the two the development stack runs. Detection is
+  # CPU-bound and an e2-micro has 0.25 vCPU of baseline: a second worker would
+  # contend for the same quarter-core rather than halve the wall clock.
+  #
+  # Without this service the gateway still ingests and still publishes jobs to
+  # Redis -- nothing errors -- but no analysis ever leaves 'queued', and the
+  # uploads page polls a spinner for ever. Measured at 77-79 MB running a real
+  # analysis, so 160m is roughly double its working set.
+  worker:
+    <<: *restart
+    image: ${WORKER_IMAGE:?required}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-logmonitor}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-logmonitor}
+      REDIS_URL: redis://redis:6379/0
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5}
+      LOG_HASH_SALT: ${JWT_SECRET:?required}
+      SHARD_SIZE: ${SHARD_SIZE:-25000}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    mem_limit: 160m
 
   web:
     <<: *restart

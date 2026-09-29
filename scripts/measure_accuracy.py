@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "worker"))
+sys.path.insert(0, str(ROOT / "backend" / "worker"))
 
 from tests.fixtures import load_sample            # noqa: E402
 from worker.detection import detect_all           # noqa: E402

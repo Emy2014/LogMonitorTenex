@@ -4,7 +4,7 @@ Two options. Start with the free one.
 
 | | Free tier | Managed |
 |---|---|---|
-| Script | `deploy_gce_free.sh` | `deploy_gcp.sh` |
+| Script | `deploy/deploy_gce_free.sh` | `deploy/deploy_gcp.sh` |
 | Cost | **$0** | ~$50/month |
 | Shape | one e2-micro running everything | Cloud Run + Cloud SQL + Memorystore |
 | Scales | no | yes |
@@ -18,7 +18,7 @@ Two options. Start with the free one.
 ```bash
 gcloud auth login
 gcloud config set project YOUR_PROJECT_ID
-./scripts/deploy_gce_free.sh
+./deploy/deploy_gce_free.sh
 ```
 
 Roughly 10 minutes, most of it Cloud Build. It prints an HTTPS URL when done.
@@ -40,8 +40,8 @@ relying on it: <https://cloud.google.com/free/docs/free-cloud-features#compute>
 
 ## Fitting in 1 GB
 
-Measured running `docker-compose.vm.yml` with its real limits, after ingesting
-the 2,735-line sample:
+Measured running `deploy/docker-compose.vm.yml` with its real limits, after ingesting
+the 2,965-line sample:
 
 | Container | Idle | Under load | Cap |
 |---|---|---|---|
@@ -91,7 +91,7 @@ Rotate deliberately with `FORCE_SECRETS=1`, understanding the above.
 
 ## Limits worth knowing
 
-- **One shared-core vCPU (0.25 baseline).** Ingest of the 2,735-line sample is
+- **One shared-core vCPU (0.25 baseline).** Ingest of the 2,965-line sample is
   instant; a 100 MB upload will take noticeably longer than the 6 seconds it
   takes on a laptop.
 - **No backups.** `gcloud compute disks snapshot` is the manual answer.
@@ -102,8 +102,8 @@ Rotate deliberately with `FORCE_SECRETS=1`, understanding the above.
 ## Verify and tear down
 
 ```bash
-./scripts/verify.sh https://logmonitor.<ip>.nip.io
-./scripts/teardown_gce_free.sh
+./deploy/verify.sh https://logmonitor.<ip>.nip.io
+./deploy/teardown_gce_free.sh
 ```
 
 `verify.sh` runs the same 14 checks against local development, the free VM, or
@@ -140,7 +140,7 @@ brew install --cask google-cloud-sdk
 gcloud auth login
 gcloud config set project YOUR_PROJECT_ID     # billing must be enabled
 
-./scripts/deploy_gcp.sh
+./deploy/deploy_gcp.sh
 ```
 
 Re-runnable: every resource is created only if absent, so a failed run can be
@@ -151,7 +151,7 @@ Then check it:
 
 ```bash
 export EDGE_AUTH_USER=ops EDGE_AUTH_PASS='...'   # only if the edge gate is on
-./scripts/verify.sh https://logmonitor-web-xxxxx.run.app
+./deploy/verify.sh https://logmonitor-web-xxxxx.run.app
 ```
 
 `verify.sh` takes a base URL and runs the same 14 checks against local
@@ -170,7 +170,7 @@ environment tends to be wrong in the other.
 | **Total** | **~$50** |
 
 Neither Cloud SQL nor Memorystore scales to zero, so the bill runs whether or
-not anyone signs in. `./scripts/teardown_gcp.sh` deletes everything.
+not anyone signs in. `./deploy/teardown_gcp.sh` deletes everything.
 
 **Redis is not optional.** It backs login rate limiting and TOTP replay
 protection. The limiter fails open by design — an unreachable cache must not
@@ -216,7 +216,7 @@ used. One interface, two implementations, no key material in cloud.
 **`--no-cpu-throttling` is gone.** v1 needed it because analysis ran in FastAPI
 `BackgroundTasks` *after* the response was sent, exactly when Cloud Run
 throttles CPU. The gateway does its ingest work inside the request, so it no
-longer applies. It will be needed again for the Phase 4 worker.
+longer applies. It will be needed again if the worker is deployed to Cloud Run.
 
 **Object storage is scoped to one bucket.** The runtime service account gets
 `roles/storage.objectAdmin` on `gs://PROJECT-logmonitor-raw` specifically, not
@@ -230,9 +230,15 @@ members are added by an admin from the Organization page.
 
 ## Not yet deployed by these scripts
 
-The Phase 4 Python worker (`worker/`) does not exist yet, so nothing consumes
-the Redis job queue and no analyses run. Redis is still deployed because rate
-limiting and TOTP replay protection use it today.
+`deploy/deploy_gcp.sh` (the managed path) still deploys only the gateway and
+web, so on Cloud Run nothing consumes the Redis job queue: uploads ingest, the
+dashboard fills from SQL, and analyses stay `queued` for ever. Redis is
+deployed regardless because rate limiting and TOTP replay protection use it.
+
+The free-tier VM path does now run the worker -- one replica, capped at 160 MB.
+It is one replica rather than the two the development stack runs because
+detection is CPU-bound and an e2-micro has 0.25 vCPU of baseline, so a second
+worker contends for the same quarter-core instead of halving the wall clock.
 
 ## Troubleshooting
 

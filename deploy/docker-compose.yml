@@ -6,6 +6,11 @@
 # corruption from collation differences. A new volume sidesteps that, and
 # leaves the v1 volume intact should you want anything out of it.
 
+# Pinned so the project is named after the product rather than after this
+# file's directory. Compose derives the name from the directory otherwise,
+# which would make `docker compose ps` from the repo root report nothing.
+name: logmonitor
+
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -27,7 +32,7 @@ services:
   # the binary, so the artifact that serves traffic and the one that migrates
   # are the same, and there is no mounted directory to fall out of date.
   migrate:
-    build: ./gateway
+    build: ../backend/gateway
     command: ["-migrate"]
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-logmonitor}:${POSTGRES_PASSWORD:-logmonitor}@db:5432/${POSTGRES_DB:-logmonitor}?sslmode=disable
@@ -86,7 +91,7 @@ services:
 
   # Go: auth, orgs, grants, streaming upload -> parse -> COPY, all read queries.
   gateway:
-    build: ./gateway
+    build: ../backend/gateway
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-logmonitor}:${POSTGRES_PASSWORD:-logmonitor}@db:5432/${POSTGRES_DB:-logmonitor}?sslmode=disable
       REDIS_URL: redis://redis:6379/0
@@ -132,7 +137,7 @@ services:
 
   # Python: map/reduce detection and the Claude stage. No HTTP surface.
   worker:
-    build: ./worker
+    build: ../backend/worker
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-logmonitor}:${POSTGRES_PASSWORD:-logmonitor}@db:5432/${POSTGRES_DB:-logmonitor}
       REDIS_URL: redis://redis:6379/0
@@ -152,7 +157,7 @@ services:
       replicas: 2
 
   web:
-    build: ./web
+    build: ../frontend/web
     environment:
       API_URL: http://gateway:8000
       # The browser-facing half of the edge gate. The gateway holds an argon2id

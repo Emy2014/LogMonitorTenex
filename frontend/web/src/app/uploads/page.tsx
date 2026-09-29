@@ -30,6 +30,10 @@ function Uploads() {
   const [dragging, setDragging] = useState(false);
   const [scope, setScope] = useState<"file" | "history">("file");
   const [windowDays, setWindowDays] = useState(30);
+  // The upload whose Delete button has been pressed once. Confirmation is a
+  // second click on the row itself rather than window.confirm, which blocks
+  // the page, or a modal, which is a lot of machinery for one question.
+  const [confirming, setConfirming] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -86,6 +90,26 @@ function Uploads() {
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not start the analysis.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Deleting takes the file, every line parsed out of it, its analyses and the
+  // archived original. Irreversible, hence the two-step button above.
+  async function remove(upload: Upload) {
+    setError(null);
+    setConfirming(null);
+    setBusy(`Deleting ${upload.filename}…`);
+    try {
+      await api(`/api/uploads/${upload.id}`, { method: "DELETE" });
+      await load();
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : "Could not delete the upload.",
+      );
     } finally {
       setBusy(null);
     }
@@ -248,7 +272,40 @@ function Uploads() {
                   >
                     {u.analysis_status ? "Re-analyse" : "Analyse"}
                   </button>
+                  {confirming === u.id ? (
+                    <span className="flex items-center gap-2">
+                      <button
+                        onClick={() => void remove(u)}
+                        disabled={busy !== null}
+                        className="rounded border border-red-500/60 bg-red-500/10 px-2.5 py-1 text-xs text-red-300 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Delete permanently
+                      </button>
+                      <button
+                        onClick={() => setConfirming(null)}
+                        className="text-xs text-slate-400 underline hover:text-slate-200"
+                      >
+                        Cancel
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => setConfirming(u.id)}
+                      disabled={busy !== null}
+                      aria-label={`Delete ${u.filename}`}
+                      className="rounded border border-slate-700 px-2.5 py-1 text-xs text-slate-400 transition-colors hover:border-red-500 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Delete
+                    </button>
+                  )}
                 </div>
+                {confirming === u.id && (
+                  <p className="w-full text-xs text-amber-300/90">
+                    This removes the file, its {u.line_count.toLocaleString()} parsed
+                    lines, every analysis of it and the archived original. It cannot be
+                    undone.
+                  </p>
+                )}
               </div>
             ))}
           </Card>

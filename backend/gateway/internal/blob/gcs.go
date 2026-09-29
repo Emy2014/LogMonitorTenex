@@ -2,6 +2,7 @@ package blob
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -37,6 +38,17 @@ func (g *gcsStore) Put(ctx context.Context, key string, r io.Reader) error {
 
 func (g *gcsStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	return g.client.Bucket(g.bucket).Object(key).NewReader(ctx)
+}
+
+// Delete removes the object. Unlike S3, GCS reports a missing object as an
+// error, so that one case is folded back into success to keep the interface's
+// idempotence promise.
+func (g *gcsStore) Delete(ctx context.Context, key string) error {
+	err := g.client.Bucket(g.bucket).Object(key).Delete(ctx)
+	if errors.Is(err, gcs.ErrObjectNotExist) {
+		return nil
+	}
+	return err
 }
 
 func (g *gcsStore) Ping(ctx context.Context) error {

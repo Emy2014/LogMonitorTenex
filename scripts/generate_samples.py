@@ -76,7 +76,9 @@ UA_CHROME = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML
 UA_CURL = "curl/8.4.0"
 UA_PYTHON = "python-requests/2.31.0"
 
-DAY = datetime(2024, 3, 14, 0, 0, 0)
+# A Thursday, recent enough that the dashboard's bounded windows are not
+# empty on a fresh upload. Move it forward when these samples age out.
+DAY = datetime(2026, 9, 24, 0, 0, 0)
 
 
 _RECORD_ID = [0]

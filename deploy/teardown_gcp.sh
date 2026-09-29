@@ -5,7 +5,7 @@
 # Cloud SQL and Memorystore bill continuously (~$50/month together), so this
 # exists to make stopping that a single command.
 #
-# Usage:  ./scripts/teardown_gcp.sh
+# Usage:  ./deploy/teardown_gcp.sh
 #
 set -euo pipefail
 

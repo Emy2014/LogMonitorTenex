@@ -7,8 +7,8 @@
 # environment tends to be wrong in the other.
 #
 # Usage:
-#   ./scripts/verify.sh                          # local, http://localhost:3000
-#   ./scripts/verify.sh https://logmonitor-web-...  # a deployment
+#   ./deploy/verify.sh                          # local, http://localhost:3000
+#   ./deploy/verify.sh https://logmonitor-web-...  # a deployment
 #
 # With the edge gate enabled, export EDGE_AUTH_USER and EDGE_AUTH_PASS first.
 #
@@ -81,16 +81,25 @@ if [ -f "$SAMPLE" ]; then
   LINES="$(printf '%s' "$UPLOAD" | sed -n 's/.*"line_count":\([0-9]*\).*/\1/p')"
   PARSED="$(printf '%s' "$UPLOAD" | sed -n 's/.*"parsed_count":\([0-9]*\).*/\1/p')"
 
-  [ "$LINES" = "2735" ] && ok "ingested the sample: $LINES lines" \
-    || bad "line_count=$LINES, expected 2735"
-  # One line is the header; every data row must parse.
-  [ "$PARSED" = "2734" ] && ok "every data row parsed: $PARSED" \
-    || bad "parsed_count=$PARSED, expected 2734"
+  # Counted from the file rather than frozen as a literal. The sample is
+  # generated, so a literal goes stale the moment anyone re-runs
+  # scripts/generate_samples.py -- which is how this check came to be asserting
+  # 2735 against a 2965-line file. Reading the file also makes the assertion
+  # the stronger one: what the server ingested must match what was actually
+  # sent, not a number someone wrote down once.
+  WANT_LINES="$(wc -l < "$SAMPLE" | tr -d ' ')"
+  WANT_PARSED="$((WANT_LINES - 1))"   # one line is the header
+
+  [ "$LINES" = "$WANT_LINES" ] && ok "ingested the sample: $LINES lines" \
+    || bad "line_count=$LINES, expected $WANT_LINES"
+  # Every data row must parse.
+  [ "$PARSED" = "$WANT_PARSED" ] && ok "every data row parsed: $PARSED" \
+    || bad "parsed_count=$PARSED, expected $WANT_PARSED"
 
   SUMMARY="$(req -b "$JAR" "$BASE/api/dashboard/summary?from=2024-01-01T00:00:00Z")"
   REQUESTS="$(printf '%s' "$SUMMARY" | sed -n 's/.*"requests":\([0-9]*\).*/\1/p')"
-  [ "$REQUESTS" = "2734" ] && ok "dashboard reflects the ingest: $REQUESTS requests" \
-    || bad "dashboard requests=$REQUESTS, expected 2734"
+  [ "$REQUESTS" = "$WANT_PARSED" ] && ok "dashboard reflects the ingest: $REQUESTS requests" \
+    || bad "dashboard requests=$REQUESTS, expected $WANT_PARSED"
 
   printf '%s' "$SUMMARY" | grep -q '"empty":false' \
     && ok "summary no longer reports empty" || bad "summary still reports empty"

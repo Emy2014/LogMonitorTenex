@@ -95,6 +95,7 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/uploads", req(a.listUploads))
 	mux.HandleFunc("POST /api/uploads", req(a.createUpload))
 	mux.HandleFunc("POST /api/uploads/{id}/analyze", req(a.startAnalysis))
+	mux.HandleFunc("DELETE /api/uploads/{id}", req(a.deleteUpload))
 	mux.HandleFunc("GET /api/analyses/{id}", req(a.getAnalysis))
 
 	mux.HandleFunc("GET /api/dashboard/summary", req(a.dashboardSummary))

@@ -14,7 +14,7 @@
 #
 # Safe to re-run: existing resources are reused, and re-running redeploys.
 #
-# Usage:  ./scripts/deploy_gce_free.sh
+# Usage:  ./deploy/deploy_gce_free.sh
 #
 set -euo pipefail
 
@@ -74,7 +74,7 @@ else
   info "gs://$BUCKET created"
 fi
 
-bold "4/7  Building images (Cloud Build, ~5 min)"
+bold "4/7  Building images (Cloud Build, ~8 min)"
 # Built here rather than on the VM: an e2-micro is 0.25 vCPU, and compiling the
 # gateway plus a Next.js production build would take ~20 minutes and probably
 # exhaust its memory.
@@ -111,8 +111,9 @@ build() {
     --quiet
 }
 
-build ./gateway "${IMAGE_BASE}/gateway:latest"
-build ./web     "${IMAGE_BASE}/web:latest"
+build ./backend/gateway "${IMAGE_BASE}/gateway:latest"
+build ./frontend/web    "${IMAGE_BASE}/web:latest"
+build ./backend/worker  "${IMAGE_BASE}/worker:latest"
 info "images pushed"
 
 bold "5/7  Compute Engine VM"
@@ -166,8 +167,20 @@ bold "6/7  Secrets"
 #   JWT_SECRET           invalidates every live session.
 #
 # Rotate deliberately with FORCE_SECRETS=1, not by accident on every deploy.
-random_token() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "${1:-32}"; }
-random_hex()   { LC_ALL=C tr -dc 'a-f0-9'    < /dev/urandom | head -c "${1:-64}"; }
+# `tr < /dev/urandom | head -c N` looks obvious and is a trap under
+# `set -euo pipefail`: head exits at N bytes, tr is still reading an infinite
+# file and dies of SIGPIPE, pipefail reports 141 and set -e kills the deploy.
+# It only ever fired on a first deployment, because every later run reuses the
+# secrets already on the VM and never calls these.
+#
+# openssl emits a finite stream, and cut reads it to EOF rather than closing
+# the pipe early, so nothing receives SIGPIPE.
+random_token() {
+  openssl rand -base64 "$(( ${1:-32} * 3 ))" | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-"${1:-32}"
+}
+random_hex() {
+  openssl rand -hex "$(( (${1:-64} + 1) / 2 ))" | cut -c1-"${1:-64}"
+}
 
 EXISTING=""
 if [ "${FORCE_SECRETS:-0}" != "1" ]; then
@@ -203,11 +216,11 @@ EDGE_SHA="$(keep EDGE_AUTH_PASS_SHA256 "")"
 EDGE_PLAINTEXT=""
 
 if [ -z "$EDGE_HASH" ] || [ -z "$EDGE_SHA" ]; then
-  EDGE_PLAINTEXT="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)"
+  EDGE_PLAINTEXT="$(random_token 20)"
   EDGE_SHA="$(printf '%s' "$EDGE_PLAINTEXT" | openssl dgst -sha256 -hex | awk '{print $NF}')"
   # Hashed by the gateway's own code, so the parameters cannot drift from what
   # the server verifies against.
-  EDGE_HASH="$(cd gateway && go run ./cmd/hashpass "$EDGE_PLAINTEXT")"
+  EDGE_HASH="$(cd backend/gateway && go run ./cmd/hashpass "$EDGE_PLAINTEXT")"
   # Docker Compose expands $VAR inside .env values, which shreds an argon2 PHC
   # string ($argon2id$v=19$...) into fragments. Doubling the dollars makes
   # Compose emit literal ones. Without this the gateway receives a mangled
@@ -230,6 +243,7 @@ cat > "$ENV_FILE" <<ENV
 SITE_ADDRESS=${SITE}
 GATEWAY_IMAGE=${IMAGE_BASE}/gateway:latest
 WEB_IMAGE=${IMAGE_BASE}/web:latest
+WORKER_IMAGE=${IMAGE_BASE}/worker:latest
 POSTGRES_USER=logmonitor
 POSTGRES_PASSWORD=${DB_PASSWORD}
 POSTGRES_DB=logmonitor
@@ -248,7 +262,7 @@ ENV
 
 bold "7/7  Starting the stack on the VM"
 gcloud compute scp --zone="$ZONE" --quiet \
-  docker-compose.vm.yml Caddyfile "$ENV_FILE" "${VM_NAME}:~/" >/dev/null
+  deploy/docker-compose.vm.yml deploy/Caddyfile "$ENV_FILE" "${VM_NAME}:~/" >/dev/null
 gcloud compute ssh "$VM_NAME" --zone="$ZONE" --quiet --command "
   set -e
   mv -f \"\$(basename $ENV_FILE)\" .env
@@ -295,10 +309,10 @@ if [ -n "$EDGE_PLAINTEXT" ]; then
 fi
 info "Past that prompt there is no seeded account: register an organization."
 info ""
-info "Verify:  ./scripts/verify.sh https://${SITE}"
+info "Verify:  ./deploy/verify.sh https://${SITE}"
 info "Logs:    gcloud compute ssh $VM_NAME --zone=$ZONE --command '/var/lib/google/docker-compose -f docker-compose.vm.yml logs -f'"
 info "Stop:    gcloud compute instances stop $VM_NAME --zone=$ZONE"
-info "Delete:  ./scripts/teardown_gce_free.sh"
+info "Delete:  ./deploy/teardown_gce_free.sh"
 info ""
 warn "The IP is ephemeral: stopping and starting the VM changes it, and the"
 warn "nip.io hostname with it. Re-run this script to pick up the new address."

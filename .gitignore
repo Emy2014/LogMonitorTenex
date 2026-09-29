@@ -34,4 +34,4 @@ api/uploads/
 .DS_Store
 
 # Python virtualenvs
-worker/.venv/
+backend/worker/.venv/

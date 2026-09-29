@@ -13,19 +13,19 @@ browsing history.
  browser
     │
     ▼
- web/      Next.js 15          login, dashboards, uploads, org admin
+ frontend/web/     Next.js 15    login, dashboards, uploads, org admin
     │ /api/*  (server-side proxy, first-party cookie)
     ▼
- gateway/  Go                  auth · orgs · grants · audit
-    │                          streaming ingest: parse → COPY → rollups
-    │                          every dashboard read query
+ backend/gateway/  Go            auth · orgs · grants · audit
+    │                            streaming ingest: parse → COPY → rollups
+    │                            every dashboard read query
     ├──────────────► object store    raw uploads, retained compressed
     ├──────────────► Redis           durable job queue, rate limits
     └──────────────► PostgreSQL 16 + pgvector
-                          ▲          partitioned events · rollups · findings
-                          │
- worker/   Python ×N ─────┘         map → reduce → score → Claude
-                                    six statistical detectors
+                              ▲      partitioned events · rollups · findings
+                              │
+ backend/worker/ Python ×N ───┘      map → reduce → score → Claude
+                                     six statistical detectors
 ```
 
 The AI does not find the anomalies and it does not compute the confidence
@@ -57,8 +57,12 @@ want to set is `ANTHROPIC_API_KEY` — it is optional, see
 
 ### 2. Start the stack
 
+The compose files live in `deploy/`. Point Compose at one for the session and
+every command below works as written, from anywhere in the repo:
+
 ```bash
-docker compose up --build        # first build takes a few minutes
+export COMPOSE_FILE=deploy/docker-compose.yml   # or pass -f each time
+docker compose up --build                       # first build takes a few minutes
 ```
 
 Compose starts the services below. `migrate` and `minio-init` run once and exit; the
@@ -89,6 +93,53 @@ The stack is healthy when `web` reports `Ready` and
    back **critical**.
 3. Upload **`samples/zscaler_benign.log`** to see the other side: ordinary
    traffic produces **zero** findings.
+
+### Signing in
+
+**There is no seeded account, and no default password.** A fresh database has
+no users at all, which is deliberate: a shipped default credential is the one
+that never gets changed.
+
+So the first thing anyone does is **Register**, and that first registration is
+what creates the organization:
+
+| | |
+|---|---|
+| First user to register | becomes the organization's **owner** |
+| Everyone after | is added by an admin, from **Organization → Members → Add member** |
+| Roles | `owner`, `admin`, `member` — an admin sees org-wide figures, a member only their own |
+
+Two consequences worth knowing before you go looking for a bug:
+
+- **A second registration creates a second organization**, not a second user in
+  yours. Tenants are isolated, so the new account sees an empty dashboard and
+  none of your uploads. To add a colleague, use **Add member** instead — an
+  admin sets their email, initial password and role there.
+- **The dashboard is empty until something is uploaded.** That is the correct
+  state for a new organization, not a failure.
+
+Optional TOTP enrolment lives under **Security**, per user. Requiring it
+org-wide is implemented in the gateway (`POST /api/org/mfa-policy`) but has no
+control in the UI yet, so it has to be called directly for now.
+
+#### A deployed instance asks twice
+
+Deployments put HTTP Basic auth in front of the whole site (`EDGE_AUTH_*`), so
+the browser shows a small password box **before** the app's own login page
+appears. It is a crawler and scanner gate, not the security boundary — the
+session, the roles and the grants behind it are.
+
+Those credentials are generated per deployment and printed once, by
+`deploy/deploy_gce_free.sh`, at the end of a first deploy. They are not in this
+repository and should not be: share them out of band. To set or rotate one
+deliberately:
+
+```bash
+scripts/gen_edge_auth.sh 'your-password' ops   # prints the three EDGE_AUTH_* values
+```
+
+The gate is off by default locally (`EDGE_AUTH_ENABLED=false` in
+`.env.example`), so `http://localhost:3000` goes straight to the login page.
 
 Analysis runs in the workers and the uploads page polls, because detection
 plus a model call takes longer than an HTTP request should stay open. Without
@@ -121,13 +172,13 @@ model defaults to `claude-opus-5`; override with `ANTHROPIC_MODEL`.
 
 For a faster edit–run loop on one component, keep the infrastructure in Docker
 and run that component natively. Each one reads the same environment variables
-`docker-compose.yml` sets, and the defaults point at `localhost`.
+`deploy/docker-compose.yml` sets, and the defaults point at `localhost`.
 
 ```bash
 docker compose up db redis minio minio-init      # infrastructure only
 
 # Gateway (Go). JWT_SECRET is the one variable with no default.
-cd gateway
+cd backend/gateway
 export JWT_SECRET=dev-secret-change-me COOKIE_SECURE=false \
        S3_ENDPOINT=http://localhost:9000 S3_FORCE_PATH_STYLE=true \
        S3_ACCESS_KEY=logmonitor S3_SECRET_KEY=logmonitor-secret
@@ -135,12 +186,12 @@ go run ./cmd/gateway -migrate            # apply migrations, exit
 go run ./cmd/gateway                     # serve on :8000
 
 # Worker (Python)
-cd worker
+cd backend/worker
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ANTHROPIC_API_KEY=sk-ant-... .venv/bin/python -m worker.main
 
 # Web (Next.js). API_URL is read per request, so no rebuild when it changes.
-cd web
+cd frontend/web
 npm ci && API_URL=http://localhost:8000 npm run dev     # :3000
 ```
 
@@ -148,7 +199,7 @@ npm ci && API_URL=http://localhost:8000 npm run dev     # :3000
 
 ```bash
 # Worker: parser fixtures, every detector, sharding, observability.
-cd worker
+cd backend/worker
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 .venv/bin/python -m pytest tests/ -v                     # 61 tests, no DB or network
 
@@ -157,12 +208,12 @@ python3 scripts/measure_accuracy.py                      # recall 6/6, 0 false p
 
 # Gateway: parser and unit tests run anywhere; the authz and handler
 # integration tests skip themselves unless a database is available.
-cd gateway && go test ./...
+cd backend/gateway && go test ./...
 TEST_DATABASE_URL=postgres://logmonitor:logmonitor@localhost:5432/logmonitor?sslmode=disable \
 TEST_REDIS_URL=redis://localhost:6379/0 go test ./...   # with the compose db and redis up
 
 # Web
-cd web && npx tsc --noEmit && npm run build
+cd frontend/web && npx tsc --noEmit && npm run build
 ```
 
 CI (`.github/workflows/ci.yml`) runs all of the above on every push.
@@ -409,10 +460,10 @@ setup at ~$50/month. Start with the free one.
 
 ```bash
 gcloud auth login && gcloud config set project YOUR_PROJECT   # once
-./scripts/deploy_gce_free.sh                                  # free VM
-./scripts/deploy_gcp.sh                                       # or: managed, ~10-15 min
-./scripts/verify.sh                                           # end-to-end check
-./scripts/teardown_gce_free.sh  /  ./scripts/teardown_gcp.sh  # delete everything billable
+./deploy/deploy_gce_free.sh                                 # free VM
+./deploy/deploy_gcp.sh                                      # or: managed, ~10-15 min
+./deploy/verify.sh                                          # end-to-end check
+./deploy/teardown_gce_free.sh  /  ./deploy/teardown_gcp.sh  # delete everything billable
 ```
 
 Full walkthrough, cost breakdown and troubleshooting in
@@ -452,17 +503,38 @@ Still deliberately out:
 
 ## Project layout
 
+Three top-level groups: what runs on a server, what runs in a browser, and
+what puts them somewhere.
+
 ```
-gateway/        Go: auth, orgs, grants, ingest, dashboard queries
-  internal/parser/      format registry + Zscaler NSS
-  internal/authz/       one resolver, every upload-scoped read
-  internal/migrations/  9 SQL migrations, embedded via go:embed
-worker/         Python: detection and the Claude stage
-  worker/detection/     six detectors, map/reduce so they can shard
-  worker/ai/            evidence packet + Claude call
-  tests/                61 tests; pure functions, no database
-web/            Next.js 15: dashboards, uploads, org admin, security
-scripts/        sample generator, accuracy gate, deploy/verify/teardown
+backend/
+  gateway/      Go: auth, orgs, grants, ingest, dashboard queries
+    internal/parser/      format registry + Zscaler NSS
+    internal/authz/       one resolver, every upload-scoped read
+    internal/migrations/  9 SQL migrations, embedded via go:embed
+  worker/       Python: detection and the Claude stage
+    worker/detection/     six detectors, map/reduce so they can shard
+    worker/ai/            evidence packet + Claude call
+    tests/                61 tests; pure functions, no database
+
+frontend/
+  web/          Next.js 15: dashboards, uploads, org admin, security
+
+deploy/         how it runs anywhere
+  docker-compose.yml      the local stack
+  docker-compose.vm.yml   the free-tier VM stack (images pulled, no MinIO)
+  Caddyfile               TLS termination on the VM
+  deploy_*.sh             free tier / managed
+  teardown_*.sh           delete everything billable
+  verify.sh               end-to-end check against a running deployment
+
+scripts/        sample generator, accuracy gate, edge-auth hashes
 samples/        five example logs: a labelled pair plus three for hand testing
 docs/           AI.md · OBSERVABILITY.md · DEPLOYMENT.md
 ```
+
+The worker sits under `backend/` rather than beside it because it is a server
+process by every measure that matters here -- it reads the same database, is
+deployed by the same scripts and never meets a browser. `frontend/` holds one
+app today; it is a group rather than the app itself so that a second surface
+(an admin console, a static status page) does not have to move anything.

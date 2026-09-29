@@ -1,0 +1,10 @@
+# node_modules is installed inside the image by the deps stage. Letting the
+# host's copy in would overwrite it at `COPY . .` -- with binaries built for
+# the developer's machine, not the linux/amd64 image -- and would ship a
+# 350 MB directory to the builder to do it.
+node_modules
+.next
+
+.git
+.DS_Store
+tsconfig.tsbuildinfo

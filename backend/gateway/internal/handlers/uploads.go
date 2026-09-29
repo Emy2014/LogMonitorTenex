@@ -391,3 +391,100 @@ func readSmallField(part *multipart.Part) string {
 	b, _ := io.ReadAll(io.LimitReader(part, 1024))
 	return strings.TrimSpace(string(b))
 }
+
+// deleteUpload removes an upload, every row parsed out of it, and the
+// compressed original in the bucket.
+//
+// Deliberately not routed through authz.Require. That resolver exists for
+// reads, and its admin path is break-glass: an admin who lacks a grant is
+// escalated and the escalation is filed as `breakglass.raw_access`. Deleting
+// is not reading, an admin cleaning up after a departed employee has not
+// looked at anyone's browsing history, and recording it as though they had
+// would make the audit log's most serious event mean two different things.
+// The rule here is its own, and simpler: the owner, or an admin.
+//
+// A grant is not enough, at any level. A grant shares a view of an upload, and
+// someone who was shown a file destroying it is not a power the person sharing
+// it meant to hand over.
+func (a *API) deleteUpload(w http.ResponseWriter, r *http.Request) {
+	caller := auth.UserFrom(r.Context())
+	ctx := r.Context()
+
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.Fail(w, http.StatusBadRequest, "id must be a uuid")
+		return
+	}
+
+	up, err := a.Store.UploadByID(ctx, id)
+	// Another organization's upload is reported as missing, never as
+	// forbidden: a 403 would confirm the id is real, which is the disclosure
+	// authz.Resolve avoids for reads and which delete must avoid too.
+	if err != nil || up.OrgID != caller.OrgID {
+		httpx.Fail(w, http.StatusNotFound, "Upload not found")
+		return
+	}
+	if up.UserID != caller.ID && !caller.Role.IsAdmin() {
+		httpx.Fail(w, http.StatusForbidden,
+			"Only the uploader or an administrator can delete this upload")
+		return
+	}
+
+	// An analysis still in flight is not a reason to refuse. Its row goes with
+	// the upload, and the worker notices: claim() updates nothing for an
+	// analysis that no longer exists, so the job is dropped as `job.skipped`
+	// rather than failing. A worker already past its claim will raise a
+	// foreign-key error on write, which it reports as a failed analysis of a
+	// row that is gone -- noisy in the log, harmless to the data.
+	entries, err := a.Store.DeleteUpload(ctx, caller.OrgID, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			httpx.Fail(w, http.StatusNotFound, "Upload not found")
+			return
+		}
+		a.Log.Error("delete upload failed", "event", "upload.delete_failed",
+			"upload_id", id, "err", err)
+		httpx.Fail(w, http.StatusInternalServerError, "Could not delete the upload")
+		return
+	}
+
+	// The archive goes after the database, not before, because the two orders
+	// fail differently and only one of them fails safely. Bucket first would,
+	// on a database error, leave a live upload whose original has been
+	// destroyed -- a row the UI still offers to re-analyse and no longer can.
+	// This way a bucket failure leaves an orphaned object that nothing
+	// references: still a privacy debt, so it is logged loudly and recorded on
+	// the audit entry with the key needed to sweep it up.
+	archiveDeleted := true
+	if a.Blob != nil {
+		if err := a.Blob.Delete(ctx, up.ObjectKey); err != nil {
+			archiveDeleted = false
+			a.Log.Error("upload deleted but its archived original remains",
+				"event", "upload.archive_orphaned",
+				"upload_id", id, "object_key", up.ObjectKey, "err", err)
+		}
+	}
+
+	actor := caller.ID
+	if err := a.Store.Audit(ctx, caller.OrgID, &actor, "upload.deleted", "upload", &id,
+		map[string]any{
+			"filename":        up.Filename,
+			"owner":           up.UserID.String(),
+			"by_admin":        up.UserID != caller.ID,
+			"line_count":      up.LineCount,
+			"entries_deleted": entries,
+			"archive_deleted": archiveDeleted,
+			"object_key":      up.ObjectKey,
+		}); err != nil {
+		// The rows are already gone, so unlike break-glass there is nothing
+		// left to withhold. Logged and carried on, as deleteGrant does.
+		a.Log.Error("audit write failed", "event", "audit.failed",
+			"action", "upload.deleted", "err", err)
+	}
+
+	a.Log.Info("upload deleted", "event", "upload.deleted",
+		"upload_id", id, "org_id", caller.OrgID, "actor", caller.ID,
+		"by_admin", up.UserID != caller.ID, "entries", entries,
+		"archive_deleted", archiveDeleted)
+	w.WriteHeader(http.StatusNoContent)
+}

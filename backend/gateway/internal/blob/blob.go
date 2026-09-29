@@ -23,10 +23,15 @@ import (
 )
 
 // Store is the archive. Small on purpose: ingest writes, re-parsing reads,
-// startup checks reachability.
+// deleting an upload removes, startup checks reachability.
 type Store interface {
 	Put(ctx context.Context, key string, r io.Reader) error
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
+	// Delete removes an archived upload. Idempotent: a key that is already
+	// gone is not an error, because the caller deleting an upload has no way
+	// to distinguish "never written" from "deleted by a previous attempt",
+	// and failing the second attempt would strand the row it was cleaning up.
+	Delete(ctx context.Context, key string) error
 	Ping(ctx context.Context) error
 	Describe() string
 }

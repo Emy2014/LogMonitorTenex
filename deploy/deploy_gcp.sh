@@ -18,7 +18,7 @@
 #   gcloud config set project YOUR_PROJECT_ID
 #   ...and billing enabled on that project.
 #
-# Usage:  ./scripts/deploy_gcp.sh
+# Usage:  ./deploy/deploy_gcp.sh
 #
 set -euo pipefail
 
@@ -62,7 +62,7 @@ info "project : $PROJECT_ID"
 info "region  : $REGION"
 info "bucket  : gs://$BUCKET"
 warn "Memorystore + the VPC connector cost roughly \$43/month on top of Cloud SQL."
-warn "Tear everything down with ./scripts/teardown_gcp.sh when you are done."
+warn "Tear everything down with ./deploy/teardown_gcp.sh when you are done."
 
 # --- 1. APIs ----------------------------------------------------------------
 
@@ -242,7 +242,7 @@ info "and a bad migration should fail a job rather than take the API down."
 # --image and would need the image built and pushed separately. deploy is also
 # create-or-update, so there is no describe-then-branch needed.
 gcloud run jobs deploy "$MIGRATE_JOB" \
-  --source ./gateway \
+  --source ./backend/gateway \
   --region="$REGION" \
   --set-cloudsql-instances="$CONN_NAME" \
   --set-secrets="DATABASE_URL=logmonitor-db-url:latest,JWT_SECRET=logmonitor-jwt-secret:latest" \
@@ -272,7 +272,7 @@ GATEWAY_ENV="${GATEWAY_ENV},MAX_UPLOAD_BYTES=536870912"
 GATEWAY_ENV="${GATEWAY_ENV},GOMEMLIMIT=640MiB"            # measured: keeps RSS ~155MB under 1Gi
 
 gcloud run deploy "$GATEWAY_SERVICE" \
-  --source ./gateway \
+  --source ./backend/gateway \
   --region "$REGION" \
   --allow-unauthenticated \
   --min-instances=0 \
@@ -291,7 +291,7 @@ info "gateway: $GATEWAY_URL"
 # API_URL is read per request by web/src/app/api/[...path]/route.ts, so this is
 # a plain env var -- the image does not need rebuilding if the URL changes.
 gcloud run deploy "$WEB_SERVICE" \
-  --source ./web \
+  --source ./frontend/web \
   --region "$REGION" \
   --allow-unauthenticated \
   --min-instances=0 \
@@ -313,5 +313,5 @@ info "gateway : $GATEWAY_URL"
 info "bucket  : gs://$BUCKET"
 [ "$HAVE_AI" = "1" ] || info "NOTE: no Anthropic key -- the AI narrative is disabled."
 info ""
-info "Verify:    ./scripts/verify_gcp.sh"
-info "Tear down: ./scripts/teardown_gcp.sh   <-- Cloud SQL + Memorystore bill ~\$50/mo until you do"
+info "Verify:    ./deploy/verify_gcp.sh"
+info "Tear down: ./deploy/teardown_gcp.sh   <-- Cloud SQL + Memorystore bill ~\$50/mo until you do"

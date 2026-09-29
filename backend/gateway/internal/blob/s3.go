@@ -48,6 +48,12 @@ func (s *s3Store) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	return s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
 }
 
+// Delete removes the object. S3 DELETE is already idempotent -- removing a
+// key that does not exist succeeds -- so there is nothing to special-case.
+func (s *s3Store) Delete(ctx context.Context, key string) error {
+	return s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
+}
+
 func (s *s3Store) Ping(ctx context.Context) error {
 	ok, err := s.client.BucketExists(ctx, s.bucket)
 	if err != nil {
